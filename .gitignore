@@ -1,0 +1,18 @@
+__pycache__/
+build/
+dist/
+*.spec
+*.pyc
+*.pdb
+.bak
+.bak2
+*.tmp
+packager_icon*.ico
+packager_icon*.jpg
+packager_icon*.png
+builtin_sfx_module.bin
+Gemini_Generated_Image_*.png
+DDU v18.1.5.3/
+Windows11Manager/
+Windows11Manager_Portable.exe
+DDUv18_1_5_3_Portable.exe
