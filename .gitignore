@@ -1,6 +1,7 @@
-__pycache__/
+﻿__pycache__/
 build/
 dist/
+_build/
 *.spec
 *.pyc
 *.pdb

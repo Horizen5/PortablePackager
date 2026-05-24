@@ -35,7 +35,8 @@ from ctypes import wintypes
 # ============================================================
 # 工作目录
 # ============================================================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 脚本所在目录（用于查找 7z.sfx 等资源）
+TARGET_DIR = None  # 用户选择的目标打包目录（在 main() 中设置）
 WORK_DIR = os.path.join(os.environ.get("TEMP", "."), "sfx_build_workspace")
 ICO_OUTPUT = os.path.join(WORK_DIR, "app_icon.ico")
 CONFIG_PATH = os.path.join(WORK_DIR, "sfx_config.txt")
@@ -240,12 +241,12 @@ def detect_main_exe(files, folders):
     # 优先在根目录查找
     for f in files:
         if f.lower().endswith(".exe") and f.lower() not in exclude_names:
-            full = os.path.join(SCRIPT_DIR, f)
+            full = os.path.join(TARGET_DIR, f)
             candidates.append((full, os.path.getsize(full)))
 
     # 根目录没有 EXE 时，再递归子目录查找
     if not candidates:
-        for root, dirs, filenames in os.walk(SCRIPT_DIR):
+        for root, dirs, filenames in os.walk(TARGET_DIR):
             dirs[:] = [d for d in dirs if d.lower() not in {"__pycache__", "node_modules", ".git"}]
             for f in filenames:
                 if f.lower().endswith(".exe") and f.lower() not in exclude_names:
@@ -263,7 +264,7 @@ def detect_sfx_module(files, main_exe=None):
     """检测当前目录中是否有 SFX 启动器（用于提取 SFX 模块）"""
     for f in files:
         if f.lower().endswith(".exe"):
-            full = os.path.join(SCRIPT_DIR, f)
+            full = os.path.join(TARGET_DIR, f)
             # 跳过主程序本身
             if main_exe and os.path.normcase(full) == os.path.normcase(main_exe):
                 continue
@@ -280,17 +281,17 @@ def detect_pack_items(main_exe_path, files, folders):
     决定要打包的文件和文件夹。
 
     策略：
-      始终打包 SCRIPT_DIR（用户选择的文件夹）下的所有内容，
+      始终打包 TARGET_DIR（用户选择的文件夹）下的所有内容，
       不再进入子目录打包。主程序路径仅用于提取图标和生成启动配置。
     """
     skip_exts = {".pdb"}
 
     items = []
-    work_dir = SCRIPT_DIR
+    work_dir = TARGET_DIR
 
     # 打包所有文件夹
     for f in folders:
-        full = os.path.join(SCRIPT_DIR, f)
+        full = os.path.join(TARGET_DIR, f)
         if os.path.isdir(full):
             file_count = sum(len(fs) for _, _, fs in os.walk(full))
             if file_count > 0:
@@ -352,8 +353,9 @@ def download_sfx_module():
             return meipass_sfx
 
     # 从脚本所在目录查找（确保使用用户提供的 SFX 模块）
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
     for name in ["7z.sfx", "7zSD.sfx", "7zS.sfx"]:
-        candidates.append(os.path.join(SCRIPT_DIR, name))
+        candidates.append(os.path.join(_script_dir, name))
 
     # 7-Zip 安装目录
     candidates.extend([
@@ -399,107 +401,284 @@ def get_builtin_sfx_module():
 
 def extract_icon(exe_path, ico_path):
     """从 PE 文件中提取图标，保存为 .ico 文件"""
-    with open(exe_path, "rb") as f:
-        data = f.read()
+    try:
+        with open(exe_path, "rb") as f:
+            data = f.read()
 
-    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
-    coff_offset = pe_offset + 4
-    num_sections = struct.unpack_from("<H", data, coff_offset + 2)[0]
-    opt_header_size = struct.unpack_from("<H", data, coff_offset + 16)[0]
-    opt_offset = coff_offset + 20
-    ddo = opt_offset + 96
-    res_rva = struct.unpack_from("<I", data, ddo + 16)[0]
+        if len(data) < 64:
+            return False
 
-    sections = []
-    for i in range(num_sections):
-        off = opt_offset + opt_header_size + i * 40
-        sections.append((
-            struct.unpack_from("<I", data, off + 12)[0],
-            struct.unpack_from("<I", data, off + 8)[0],
-            struct.unpack_from("<I", data, off + 20)[0],
-            struct.unpack_from("<I", data, off + 16)[0],
-        ))
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        if pe_offset == 0 or pe_offset + 24 > len(data):
+            return False
 
-    def rva_to_off(rva):
-        for va, vs, ro, rs in sections:
-            if va <= rva < va + max(vs, rs):
-                return ro + (rva - va)
-        return 0
+        coff_offset = pe_offset + 4
+        num_sections = struct.unpack_from("<H", data, coff_offset + 2)[0]
+        opt_header_size = struct.unpack_from("<H", data, coff_offset + 16)[0]
+        opt_offset = coff_offset + 20
 
-    res_off = rva_to_off(res_rva)
+        if opt_offset + 112 > len(data):
+            return False
 
-    def parse_dir(off, base):
-        nn = struct.unpack_from("<H", data, off + 12)[0]
-        ni = struct.unpack_from("<H", data, off + 14)[0]
-        entries = []
-        for i in range(nn + ni):
-            eo = off + 16 + i * 8
-            nid = struct.unpack_from("<I", data, eo)[0]
-            dv = struct.unpack_from("<I", data, eo + 4)[0]
-            entries.append((str(nid), bool(dv & 0x80000000), dv & 0x7FFFFFFF))
-        return entries
+        ddo = opt_offset + 96
+        res_rva = struct.unpack_from("<I", data, ddo + 16)[0]
 
-    def get_data(off, base):
-        rva = struct.unpack_from("<I", data, off)[0]
-        size = struct.unpack_from("<I", data, off + 4)[0]
-        foff = rva_to_off(rva)
-        return data[foff:foff + size]
+        # 没有资源段则直接返回
+        if res_rva == 0:
+            return False
 
-    types = parse_dir(res_off, res_off)
-    icon_group_dir = icon_dir = None
-    for name, is_dir, sub in types:
-        if name == "14":
-            icon_group_dir = parse_dir(res_off + sub, res_off)
-        elif name == "3":
-            icon_dir = parse_dir(res_off + sub, res_off)
+        sections = []
+        for i in range(num_sections):
+            off = opt_offset + opt_header_size + i * 40
+            if off + 40 > len(data):
+                continue
+            sections.append((
+                struct.unpack_from("<I", data, off + 12)[0],
+                struct.unpack_from("<I", data, off + 8)[0],
+                struct.unpack_from("<I", data, off + 20)[0],
+                struct.unpack_from("<I", data, off + 16)[0],
+            ))
 
-    if not icon_group_dir or not icon_dir:
+        def rva_to_off(rva):
+            for va, vs, ro, rs in sections:
+                if va <= rva < va + max(vs, rs):
+                    return ro + (rva - va)
+            return 0
+
+        res_off = rva_to_off(res_rva)
+        if res_off == 0 or res_off + 16 > len(data):
+            return False
+
+        def parse_dir(off, base):
+            if off + 16 > len(data):
+                return []
+            nn = struct.unpack_from("<H", data, off + 12)[0]
+            ni = struct.unpack_from("<H", data, off + 14)[0]
+            entries = []
+            for i in range(nn + ni):
+                eo = off + 16 + i * 8
+                if eo + 8 > len(data):
+                    break
+                nid = struct.unpack_from("<I", data, eo)[0]
+                dv = struct.unpack_from("<I", data, eo + 4)[0]
+                entries.append((str(nid), bool(dv & 0x80000000), dv & 0x7FFFFFFF))
+            return entries
+
+        def get_data(off, base):
+            if off + 8 > len(data):
+                return b""
+            rva = struct.unpack_from("<I", data, off)[0]
+            size = struct.unpack_from("<I", data, off + 4)[0]
+            foff = rva_to_off(rva)
+            if foff == 0 or foff + size > len(data):
+                return b""
+            return data[foff:foff + size]
+
+        types = parse_dir(res_off, res_off)
+        icon_group_dir = icon_dir = None
+        for name, is_dir, sub in types:
+            if name == "14":
+                icon_group_dir = parse_dir(res_off + sub, res_off)
+            elif name == "3":
+                icon_dir = parse_dir(res_off + sub, res_off)
+
+        if not icon_group_dir or not icon_dir:
+            return False
+
+        grp_entries = parse_dir(res_off + icon_group_dir[0][2], res_off)
+        if not grp_entries:
+            return False
+        grp_data = get_data(res_off + grp_entries[0][2], res_off)
+        if len(grp_data) < 6:
+            return False
+        count = struct.unpack_from("<H", grp_data, 4)[0]
+
+        icon_entries = {}
+        for name, is_dir, sub in icon_dir:
+            if is_dir:
+                lang_entries = parse_dir(res_off + sub, res_off)
+                for _, _, lsub in lang_entries:
+                    icon_entries[name] = get_data(res_off + lsub, res_off)
+
+        ico = bytearray(struct.pack("<HHH", 0, 1, count))
+        data_offset = 6 + count * 16
+        data_parts = []
+
+        for idx in range(count):
+            eo = 6 + idx * 14
+            if eo + 14 > len(grp_data):
+                break
+            w, h = grp_data[eo], grp_data[eo + 1]
+            colors = grp_data[eo + 2]
+            planes = struct.unpack_from("<H", grp_data, eo + 4)[0]
+            bpp = struct.unpack_from("<H", grp_data, eo + 6)[0]
+            icon_id = str(struct.unpack_from("<H", grp_data, eo + 12)[0])
+
+            ico_w = w if w < 256 else 0
+            ico_h = h if h < 256 else 0
+
+            if icon_id in icon_entries:
+                actual = len(icon_entries[icon_id])
+                ico += struct.pack("<BBBBHHII", ico_w, ico_h, colors, 0, planes, bpp, actual, data_offset)
+                data_parts.append(icon_entries[icon_id])
+                data_offset += actual
+
+        with open(ico_path, "wb") as f:
+            f.write(ico)
+            for part in data_parts:
+                f.write(part)
+
+        log(f"图标已提取：{count} 种尺寸，{os.path.getsize(ico_path)} 字节")
+        return True
+    except Exception as e:
+        log(f"图标提取异常：{e}")
         return False
 
-    grp_entries = parse_dir(res_off + icon_group_dir[0][2], res_off)
-    grp_data = get_data(res_off + grp_entries[0][2], res_off)
-    count = struct.unpack_from("<H", grp_data, 4)[0]
 
-    icon_entries = {}
-    for name, is_dir, sub in icon_dir:
-        if is_dir:
-            lang_entries = parse_dir(res_off + sub, res_off)
-            for _, _, lsub in lang_entries:
-                icon_entries[name] = get_data(res_off + lsub, res_off)
+def extract_icon_from_rsrc_section(exe_path, ico_path):
+    """
+    从具有非标准资源目录的 PE 文件中提取图标
+    适用于 PE 头中资源 RVA 为 0 但 .rsrc 节仍然存在的情况
+    """
+    try:
+        with open(exe_path, "rb") as f:
+            data = f.read()
 
-    ico = bytearray(struct.pack("<HHH", 0, 1, count))
-    data_offset = 6 + count * 16
-    data_parts = []
+        if len(data) < 64:
+            return False
 
-    for idx in range(count):
-        eo = 6 + idx * 14
-        w, h = grp_data[eo], grp_data[eo + 1]
-        colors = grp_data[eo + 2]
-        planes = struct.unpack_from("<H", grp_data, eo + 4)[0]
-        bpp = struct.unpack_from("<H", grp_data, eo + 6)[0]
-        icon_id = str(struct.unpack_from("<H", grp_data, eo + 12)[0])
+        # 解析 PE 头
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        if pe_offset == 0 or pe_offset + 24 > len(data):
+            return False
 
-        ico_w = w if w < 256 else 0
-        ico_h = h if h < 256 else 0
+        coff_offset = pe_offset + 4
+        num_sections = struct.unpack_from("<H", data, coff_offset + 2)[0]
+        opt_header_size = struct.unpack_from("<H", data, coff_offset + 16)[0]
+        opt_offset = coff_offset + 20
 
-        if icon_id in icon_entries:
-            actual = len(icon_entries[icon_id])
-            ico += struct.pack("<BBBBHHII", ico_w, ico_h, colors, 0, planes, bpp, actual, data_offset)
-            data_parts.append(icon_entries[icon_id])
-            data_offset += actual
+        if opt_offset + 112 > len(data):
+            return False
 
-    with open(ico_path, "wb") as f:
-        f.write(ico)
-        for part in data_parts:
-            f.write(part)
+        # 查找 .rsrc 节
+        rsrc_ro = None
+        rsrc_va = None
+        for i in range(num_sections):
+            off = opt_offset + opt_header_size + i * 40
+            if off + 40 > len(data):
+                continue
+            name = data[off:off+8].rstrip(b'\x00').decode('ascii', errors='ignore')
+            if name == '.rsrc':
+                rsrc_va = struct.unpack_from("<I", data, off + 12)[0]
+                rsrc_ro = struct.unpack_from("<I", data, off + 20)[0]
+                break
 
-    log(f"图标已提取：{count} 种尺寸，{os.path.getsize(ico_path)} 字节")
-    return True
+        if rsrc_ro is None:
+            return False
 
+        # 从 .rsrc 节解析资源目录
+        base = rsrc_ro
 
-# ============================================================
-# 图标替换
-# ============================================================
+        def parse_dir(off):
+            """解析资源目录"""
+            if base + off + 16 > len(data):
+                return []
+            nn = struct.unpack_from("<H", data, base + off + 12)[0]
+            ni = struct.unpack_from("<H", data, base + off + 14)[0]
+            entries = []
+            for i in range(nn + ni):
+                eo = base + off + 16 + i * 8
+                if eo + 8 > len(data):
+                    break
+                nid = struct.unpack_from("<I", data, eo)[0]
+                dv = struct.unpack_from("<I", data, eo + 4)[0]
+                entries.append((nid, bool(dv & 0x80000000), dv & 0x7FFFFFFF))
+            return entries
+
+        def get_data(off):
+            """获取资源数据"""
+            if base + off + 8 > len(data):
+                return b""
+            rva = struct.unpack_from("<I", data, base + off)[0]
+            size = struct.unpack_from("<I", data, base + off + 4)[0]
+            # 资源数据 RVA 需要转换为文件偏移
+            foff = rsrc_ro + (rva - rsrc_va)
+            if foff + size > len(data):
+                return b""
+            return data[foff:foff + size]
+
+        # 查找 RT_ICON (3) 和 RT_GROUP_ICON (14)
+        root = parse_dir(0)
+        icon_group_dir = None
+        icon_dir = None
+
+        for nid, is_dir, sub in root:
+            if nid == 3:  # RT_ICON
+                icon_dir = parse_dir(sub)
+            elif nid == 14:  # RT_GROUP_ICON
+                icon_group_dir = parse_dir(sub)
+
+        if not icon_group_dir or not icon_dir:
+            return False
+
+        # 获取第一个图标组
+        if not icon_group_dir:
+            return False
+
+        grp_entries = parse_dir(icon_group_dir[0][2])
+        if not grp_entries:
+            return False
+
+        grp_data = get_data(grp_entries[0][2])
+        if len(grp_data) < 6:
+            return False
+
+        count = struct.unpack_from("<H", grp_data, 4)[0]
+
+        # 获取所有图标数据
+        icon_entries = {}
+        for nid, is_dir, sub in icon_dir:
+            if is_dir:
+                lang_entries = parse_dir(sub)
+                for _, _, lsub in lang_entries:
+                    icon_entries[nid] = get_data(lsub)
+
+        # 构建 ICO 文件
+        ico = bytearray(struct.pack("<HHH", 0, 1, count))
+        data_offset = 6 + count * 16
+        data_parts = []
+
+        for idx in range(count):
+            eo = 6 + idx * 14
+            if eo + 14 > len(grp_data):
+                break
+            w = grp_data[eo]
+            h = grp_data[eo + 1]
+            colors = grp_data[eo + 2]
+            planes = struct.unpack_from("<H", grp_data, eo + 4)[0]
+            bpp = struct.unpack_from("<H", grp_data, eo + 6)[0]
+            icon_id = struct.unpack_from("<H", grp_data, eo + 12)[0]
+
+            ico_w = w if w < 256 else 0
+            ico_h = h if h < 256 else 0
+
+            if icon_id in icon_entries:
+                icon_data = icon_entries[icon_id]
+                actual = len(icon_data)
+                ico += struct.pack("<BBBBHHII", ico_w, ico_h, colors, 0, planes, bpp, actual, data_offset)
+                data_parts.append(icon_data)
+                data_offset += actual
+
+        with open(ico_path, "wb") as f:
+            f.write(ico)
+            for part in data_parts:
+                f.write(part)
+
+        log(f"图标已提取（.rsrc节）：{count} 种尺寸，{os.path.getsize(ico_path)} 字节")
+        return True
+    except Exception as e:
+        return False
+
 
 def replace_icon_in_exe(exe_path, ico_path, output_path):
     """替换 EXE 中的图标资源"""
@@ -817,13 +996,27 @@ def create_sfx_config(config_path, run_program, temp_folder_name, exe_name):
     # 生成 VBS 提权启动脚本（写入工作目录，打包时一起压缩）
     vbs_name = "_run_elevated.vbs"
     vbs_path = os.path.join(WORK_DIR, vbs_name)
-    # VBS 脚本：以管理员权限启动目标 EXE
-    vbs_content = f'''Set objShell = CreateObject("Shell.Application")
-exePath = CreateObject("Scripting.FileSystemObject").BuildPath( _
-    CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName), "{exe_name}")
-objShell.ShellExecute exePath, "", "", "runas", 1
+    # VBS 脚本：以管理员权限启动目标 EXE，并等待其退出
+    # 使用 Shell.Application 提权启动，然后用 WMI 监听进程退出
+    # 这样 SFX 的清理机制才能正常工作（否则会产生垃圾文件）
+    vbs_content = f'''Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("Shell.Application")
+scriptPath = WScript.ScriptFullName
+parentFolder = fso.GetParentFolderName(scriptPath)
+exePath = parentFolder & "\\{exe_name}"
+' 以管理员权限启动目标程序
+shell.ShellExecute exePath, "", parentFolder, "runas", 1
+' 等待目标进程退出（通过 WMI 监听）
+Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")
+exeName = "{exe_name}"
+Do
+    WScript.Sleep 500
+    Set procs = wmi.ExecQuery("SELECT * FROM Win32_Process WHERE Name='" & exeName & "'")
+Loop While procs.Count > 0
 '''
-    with open(vbs_path, "w", encoding="utf-8") as f:
+    # VBS 脚本必须使用系统 ANSI 编码（中文系统为 GBK/cp936），否则中文字符会乱码
+    # Windows Script Host 默认使用系统代码页，不是 UTF-8
+    with open(vbs_path, "w", encoding="gbk") as f:
         f.write(vbs_content)
 
     # SFX 配置：先运行 VBS 提权脚本
@@ -857,6 +1050,9 @@ def main():
     print("  通用型 EXE 便携版打包工具")
     print("=" * 60)
 
+    # 压缩级别：1（最快压缩，速度和体积平衡最佳）
+    compress_level = 1
+
     # ---- 获取目标文件夹（支持拖拽） ----
     separator()
     target_dir = None
@@ -876,13 +1072,13 @@ def main():
         safe_input("\n按回车键退出...")
         sys.exit(0)
 
-    # 将全局工作目录改为用户选择的文件夹
-    global SCRIPT_DIR
-    SCRIPT_DIR = target_dir
-    log(f"目标文件夹：{SCRIPT_DIR}")
+    # 设置目标打包目录
+    global TARGET_DIR
+    TARGET_DIR = target_dir
+    log(f"目标文件夹：{TARGET_DIR}")
 
     # 输出目录为用户选择的文件夹的上一级目录
-    OUTPUT_DIR = os.path.dirname(SCRIPT_DIR)
+    OUTPUT_DIR = os.path.dirname(TARGET_DIR)
     log(f"输出目录：{OUTPUT_DIR}")
 
     # ---- 依赖检查 ----
@@ -896,12 +1092,23 @@ def main():
         import pefile  # noqa: F401
     except ImportError:
         log("正在安装 pefile...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "pefile"], check=True)
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "pefile"], capture_output=True)
+        if result.returncode != 0:
+            log("错误：pefile 安装失败，请手动执行 pip install pefile")
+            log(f"详情：{result.stderr.decode('utf-8', errors='ignore')}")
+            safe_input("\n按回车键退出...")
+            sys.exit(1)
+        try:
+            import pefile  # noqa: F401
+        except ImportError:
+            log("错误：pefile 安装后仍无法导入，请检查 Python 环境")
+            safe_input("\n按回车键退出...")
+            sys.exit(1)
 
     # ---- 自动检测 ----
     separator()
     print("[自动检测] 扫描当前目录...")
-    files, folders = find_all_files(SCRIPT_DIR)
+    files, folders = find_all_files(TARGET_DIR)
 
     log(f"文件：{len(files)} 个")
     for f in files:
@@ -922,7 +1129,7 @@ def main():
         log("错误：未找到主程序 EXE")
         safe_input("\n按回车键退出...")
         sys.exit(1)
-    main_exe_rel = os.path.relpath(main_exe, SCRIPT_DIR).replace("/", "\\")
+    main_exe_rel = os.path.relpath(main_exe, TARGET_DIR).replace("/", "\\")
     log(f"主程序：{main_exe_rel}（{os.path.getsize(main_exe)} 字节）")
 
     # 检测 SFX 模块
@@ -1006,7 +1213,11 @@ def main():
     # ---- 步骤 2：提取图标 ----
     separator()
     print("[2/6] 提取图标...")
-    if not extract_icon(main_exe, ICO_OUTPUT):
+    icon_extracted = extract_icon(main_exe, ICO_OUTPUT)
+    if not icon_extracted:
+        # 尝试从 .rsrc 节提取（适用于非标准 PE 文件）
+        icon_extracted = extract_icon_from_rsrc_section(main_exe, ICO_OUTPUT)
+    if not icon_extracted:
         log("警告：图标提取失败，将使用默认图标")
 
     # ---- 步骤 3：提取版本信息 ----
@@ -1038,7 +1249,7 @@ def main():
     if os.path.isfile(vbs_full_path):
         pack_paths.append(vbs_full_path)
     result = subprocess.run(
-        [seven_z, "a", "-t7z", "-mx=9", ARCHIVE_PATH] + pack_paths,
+        [seven_z, "a", "-t7z", f"-mx={compress_level}", ARCHIVE_PATH] + pack_paths,
         capture_output=True, text=True, cwd=pack_work_dir,
     )
     if result.returncode != 0:
@@ -1097,7 +1308,7 @@ def main():
     # 清理
     shutil.rmtree(WORK_DIR)
     # 清理内置 SFX 临时文件
-    builtin_sfx_temp = os.path.join(SCRIPT_DIR, "__sfx_temp__.sfx")
+    builtin_sfx_temp = os.path.join(TARGET_DIR, "__sfx_temp__.sfx")
     if os.path.isfile(builtin_sfx_temp):
         os.remove(builtin_sfx_temp)
 

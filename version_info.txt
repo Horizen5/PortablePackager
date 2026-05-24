@@ -1,0 +1,33 @@
+# UTF-8
+#
+# 此文件用于 PyInstaller 嵌入版本信息
+# 通过 --version-file 参数使用
+
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        '080404b0',
+        [StringStruct('CompanyName', 'PortablePackager Team'),
+        StringStruct('FileDescription', '通用型 EXE 便携版打包工具'),
+        StringStruct('FileVersion', '1.2.0.0'),
+        StringStruct('InternalName', 'PortablePackager'),
+        StringStruct('LegalCopyright', 'Copyright (C) 2026'),
+        StringStruct('OriginalFilename', 'PortablePackager.exe'),
+        StringStruct('ProductName', 'PortablePackager'),
+        StringStruct('ProductVersion', '1.2.0.0')])
+      ]),
+    VarFileInfo([VarStruct('Translation', [0x0804, 0x04B0])])
+  ]
+)
